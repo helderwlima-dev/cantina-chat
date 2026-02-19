@@ -10,7 +10,7 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ erro: "Metodo no permitido" });
 
-  const supabase = createClient(process.env.SUPABASEURL, process.env.SUPABASEKEY);
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
   try {
     const { aluno_id, valor, descricao, forcar } = req.body || {};
