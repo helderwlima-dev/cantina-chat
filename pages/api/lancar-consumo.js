@@ -1,3 +1,7 @@
+export const config = {
+  api: { bodyParser: false }
+};
+
 import { createClient } from "@supabase/supabase-js";
 
 function getSupabaseClient(res) {
@@ -15,16 +19,22 @@ function getSupabaseClient(res) {
   return createClient(supabaseUrl, supabaseKey);
 }
 
-async function readBodySafe(req) {
-  if (req.body && typeof req.body === "object") return req.body;
+import getRawBody from "raw-body";
 
-  if (typeof req.body === "string") {
-    try {
-      return JSON.parse(req.body);
-    } catch {
-      return {};
-    }
+async function readBodySafe(req) {
+  const raw = await getRawBody(req, {
+    length: req.headers["content-length"],
+    limit: "1mb",
+    encoding: "utf-8"
+  });
+
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
   }
+}
 
   return await new Promise((resolve) => {
     let data = "";
