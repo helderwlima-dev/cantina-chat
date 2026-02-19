@@ -12,34 +12,36 @@ function getSupabaseClient(res) {
     res.status(500).json({ erro: "Env ausente: SUPABASE_KEY" });
     return null;
   }
-
   return createClient(supabaseUrl, supabaseKey);
 }
 
-// Ajuda quando o req.body vem como string, buffer ou vem vazio
 async function readBodySafe(req) {
-  // Caso 1: Next já parseou
   if (req.body && typeof req.body === "object") return req.body;
 
-  // Caso 2: body veio como string (às vezes)
   if (typeof req.body === "string") {
-    try { return JSON.parse(req.body); } catch { return {}; }
+    try {
+      return JSON.parse(req.body);
+    } catch {
+      return {};
+    }
   }
 
-  // Caso 3: ler o stream manualmente (último recurso)
   return await new Promise((resolve) => {
     let data = "";
     req.on("data", (chunk) => (data += chunk));
     req.on("end", () => {
       if (!data) return resolve({});
-      try { resolve(JSON.parse(data)); } catch { resolve({}); }
+      try {
+        resolve(JSON.parse(data));
+      } catch {
+        resolve({});
+      }
     });
     req.on("error", () => resolve({}));
   });
 }
 
 export default async function handler(req, res) {
-  // CORS (Hoppscotch no browser precisa disso)
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
@@ -54,19 +56,39 @@ export default async function handler(req, res) {
   try {
     const body = await readBodySafe(req);
 
-    const aluno_id = body.aluno_id;
-    const valorNum = Number(body.valor);
+    // Aceita várias grafias (pra não travar por detalhe)
+    const aluno_id =
+      body.aluno_id ??
+      body.alunoId ??
+      body.alunoid ??
+      body.aluno ??
+      null;
+
+    const rawValor =
+      body.valor ??
+      body.valorTotal ??
+      body.total ??
+      null;
+
+    const valorNum = Number(rawValor);
     const origem = (body.origem || "Venda na cantina").toString();
     const forcar = !!body.forcar;
 
     if (!aluno_id) {
-      return res.status(400).json({ erro: "Campo obrigatorio: aluno_id" });
-    }
-    if (Number.isNaN(valorNum) || valorNum <= 0) {
-      return res.status(400).json({ erro: "Campo obrigatorio: valor (numero > 0)" });
+      return res.status(400).json({
+        erro: "Campo obrigatorio: aluno_id",
+        dica: "Envie aluno_id (ou alunoId / alunoid) no JSON"
+      });
     }
 
-    // 1) Busca aluno
+    if (Number.isNaN(valorNum) || valorNum <= 0) {
+      return res.status(400).json({
+        erro: "Campo obrigatorio: valor (numero > 0)",
+        dica: "Envie valor (ou total / valorTotal) como numero"
+      });
+    }
+
+    // 1) Busca aluno (aluno_id do JSON = alunos.id)
     const { data: aluno, error: erroAluno } = await supabase
       .from("alunos")
       .select("id, nome, ativo, saldo_atual, limite_diario, limite_mensal, limite_fiado")
@@ -84,6 +106,7 @@ export default async function handler(req, res) {
 
     // 2) Calcula total do dia e do mês (somente débitos)
     const agora = new Date();
+
     const inicioHoje = new Date(agora);
     inicioHoje.setHours(0, 0, 0, 0);
 
@@ -170,7 +193,7 @@ export default async function handler(req, res) {
 
     if (erroUpdate) return res.status(500).json({ erro: erroUpdate.message });
 
-    // 5) Grava movimentação e retorna
+    // 5) Grava movimentação (referencia_id com underscore)
     const { data: movCriada, error: erroInsert } = await supabase
       .from("movimentacoes_saldo")
       .insert({
@@ -183,17 +206,4 @@ export default async function handler(req, res) {
       .select("id, aluno_id, tipo, valor, origem, referencia_id, created_at")
       .single();
 
-    if (erroInsert) return res.status(500).json({ erro: erroInsert.message });
-
-    return res.status(200).json({
-      sucesso: true,
-      liberado_manual: !!forcar,
-      aluno: { id: aluno.id, nome: aluno.nome },
-      saldo_anterior: saldoAnterior,
-      saldo_atual: saldoNovo,
-      movimentacao: movCriada
-    });
-  } catch (err) {
-    return res.status(500).json({ erro: err?.message || "Erro interno" });
-  }
-}
+    if (erroInsert) return res.status
