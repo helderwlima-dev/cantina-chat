@@ -37,6 +37,15 @@ export default async function handler(req, res) {
 
   try {
     const body = await readBodySafe(req);
+    // DEBUG TEMPORÁRIO: devolve o que a API recebeu
+if (req.query?.debug === "1") {
+  return res.status(200).json({
+    ok: true,
+    headers: req.headers,
+    bodyRecebido: body
+  });
+}
+
 
     // DEBUG (veja em Vercel > Functions > api/lancar-consumo)
     console.log("DEBUG headers:", req.headers);
