@@ -16,8 +16,30 @@ function getSupabaseClient(res) {
   return createClient(supabaseUrl, supabaseKey);
 }
 
+// Ajuda quando o req.body vem como string, buffer ou vem vazio
+async function readBodySafe(req) {
+  // Caso 1: Next já parseou
+  if (req.body && typeof req.body === "object") return req.body;
+
+  // Caso 2: body veio como string (às vezes)
+  if (typeof req.body === "string") {
+    try { return JSON.parse(req.body); } catch { return {}; }
+  }
+
+  // Caso 3: ler o stream manualmente (último recurso)
+  return await new Promise((resolve) => {
+    let data = "";
+    req.on("data", (chunk) => (data += chunk));
+    req.on("end", () => {
+      if (!data) return resolve({});
+      try { resolve(JSON.parse(data)); } catch { resolve({}); }
+    });
+    req.on("error", () => resolve({}));
+  });
+}
+
 export default async function handler(req, res) {
-  // CORS
+  // CORS (Hoppscotch no browser precisa disso)
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
@@ -30,11 +52,11 @@ export default async function handler(req, res) {
   if (!supabase) return;
 
   try {
-    const body = req.body || {};
+    const body = await readBodySafe(req);
 
     const aluno_id = body.aluno_id;
     const valorNum = Number(body.valor);
-    const origem = body.origem || body.descricao || "Venda na cantina";
+    const origem = (body.origem || "Venda na cantina").toString();
     const forcar = !!body.forcar;
 
     if (!aluno_id) {
@@ -44,10 +66,10 @@ export default async function handler(req, res) {
       return res.status(400).json({ erro: "Campo obrigatorio: valor (numero > 0)" });
     }
 
-    // 1) Busca aluno com limites e fiado
+    // 1) Busca aluno
     const { data: aluno, error: erroAluno } = await supabase
       .from("alunos")
-      .select("id, nome, saldo_atual, limite_diario, limite_mensal, limite_fiado, ativo")
+      .select("id, nome, ativo, saldo_atual, limite_diario, limite_mensal, limite_fiado")
       .eq("id", aluno_id)
       .single();
 
@@ -55,94 +77,81 @@ export default async function handler(req, res) {
     if (!aluno) return res.status(404).json({ erro: "Aluno nao encontrado" });
     if (aluno.ativo === false) return res.status(400).json({ erro: "Aluno inativo" });
 
-    const saldoAtualBD = Number(aluno.saldo_atual || 0);
+    const saldoAtual = Number(aluno.saldo_atual || 0);
     const limiteDiario = Number(aluno.limite_diario || 0);
     const limiteMensal = Number(aluno.limite_mensal || 0);
     const limiteFiado = Number(aluno.limite_fiado || 0);
 
-    // 2) Totais do dia e do mês (somente débitos)
-    const hojeInicio = new Date();
-    hojeInicio.setHours(0, 0, 0, 0);
-    const inicioMes = new Date(hojeInicio.getFullYear(), hojeInicio.getMonth(), 1);
+    // 2) Calcula total do dia e do mês (somente débitos)
+    const agora = new Date();
+    const inicioHoje = new Date(agora);
+    inicioHoje.setHours(0, 0, 0, 0);
+
+    const inicioMes = new Date(agora.getFullYear(), agora.getMonth(), 1);
+    inicioMes.setHours(0, 0, 0, 0);
 
     const { data: movDia, error: erroMovDia } = await supabase
       .from("movimentacoes_saldo")
-      .select("valor, created_at")
+      .select("valor")
       .eq("aluno_id", aluno_id)
-      .gte("created_at", hojeInicio.toISOString());
+      .gte("created_at", inicioHoje.toISOString());
 
     if (erroMovDia) return res.status(500).json({ erro: erroMovDia.message });
 
     const totalDia = (movDia || [])
-      .filter((m) => Number(m.valor) < 0)
-      .reduce((s, m) => s + Math.abs(Number(m.valor)), 0);
+      .map((m) => Number(m.valor || 0))
+      .filter((v) => v < 0)
+      .reduce((acc, v) => acc + Math.abs(v), 0);
 
     const { data: movMes, error: erroMovMes } = await supabase
       .from("movimentacoes_saldo")
-      .select("valor, created_at")
+      .select("valor")
       .eq("aluno_id", aluno_id)
       .gte("created_at", inicioMes.toISOString());
 
     if (erroMovMes) return res.status(500).json({ erro: erroMovMes.message });
 
     const totalMes = (movMes || [])
-      .filter((m) => Number(m.valor) < 0)
-      .reduce((s, m) => s + Math.abs(Number(m.valor)), 0);
+      .map((m) => Number(m.valor || 0))
+      .filter((v) => v < 0)
+      .reduce((acc, v) => acc + Math.abs(v), 0);
 
-    // 3) Regras automáticas (sem forcar)
+    // 3) Validações (se não forçar)
     if (!forcar) {
-      // limite diário
       if (limiteDiario > 0 && totalDia + valorNum > limiteDiario) {
         return res.status(200).json({
           alerta: true,
           tipo: "limite_diario",
           mensagem: "Limite diario ultrapassado. Deseja liberar mesmo assim?",
-          aluno: {
-            id: aluno.id,
-            nome: aluno.nome,
-            saldo_atual: saldoAtualBD
-          },
+          aluno: { id: aluno.id, nome: aluno.nome, saldo_atual: saldoAtual },
           limite_diario: limiteDiario,
           total_dia: totalDia,
           valor_solicitado: valorNum
         });
       }
 
-      // limite mensal
       if (limiteMensal > 0 && totalMes + valorNum > limiteMensal) {
         return res.status(200).json({
           alerta: true,
           tipo: "limite_mensal",
           mensagem: "Limite mensal ultrapassado. Deseja liberar mesmo assim?",
-          aluno: {
-            id: aluno.id,
-            nome: aluno.nome,
-            saldo_atual: saldoAtualBD
-          },
+          aluno: { id: aluno.id, nome: aluno.nome, saldo_atual: saldoAtual },
           limite_mensal: limiteMensal,
           total_mes: totalMes,
           valor_solicitado: valorNum
         });
       }
 
-      // limite de fiado
-      // regra B: limite_fiado = 0 -> sem limite
+      // Regra B: limite_fiado = 0 => sem limite
       if (limiteFiado > 0) {
-        const saldoDepois = saldoAtualBD - valorNum; // débito
-        const limiteNegativo = -limiteFiado;
-
-        if (saldoDepois < limiteNegativo) {
+        const saldoDepois = saldoAtual - valorNum;
+        if (saldoDepois < -limiteFiado) {
           return res.status(200).json({
             alerta: true,
             tipo: "limite_fiado",
             mensagem: "Limite de fiado ultrapassado. Deseja liberar mesmo assim?",
-            aluno: {
-              id: aluno.id,
-              nome: aluno.nome,
-              saldo_atual: saldoAtualBD
-            },
+            aluno: { id: aluno.id, nome: aluno.nome, saldo_atual: saldoAtual },
             limite_fiado: limiteFiado,
-            saldo_atual: saldoAtualBD,
             saldo_apos_venda: saldoDepois,
             valor_solicitado: valorNum
           });
@@ -150,8 +159,8 @@ export default async function handler(req, res) {
       }
     }
 
-    // 4) Atualiza saldo (débito)
-    const saldoAnterior = saldoAtualBD;
+    // 4) Atualiza saldo
+    const saldoAnterior = saldoAtual;
     const saldoNovo = saldoAnterior - valorNum;
 
     const { error: erroUpdate } = await supabase
@@ -161,7 +170,7 @@ export default async function handler(req, res) {
 
     if (erroUpdate) return res.status(500).json({ erro: erroUpdate.message });
 
-    // 5) Registra movimentação e retorna o registro
+    // 5) Grava movimentação e retorna
     const { data: movCriada, error: erroInsert } = await supabase
       .from("movimentacoes_saldo")
       .insert({
