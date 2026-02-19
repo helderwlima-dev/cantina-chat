@@ -1,57 +1,32 @@
-export const config = {
-  api: { bodyParser: false }
-};
-
 import { createClient } from "@supabase/supabase-js";
 
-function getSupabaseClient(res) {
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseKey = process.env.SUPABASE_KEY;
-
-  if (!supabaseUrl) {
-    res.status(500).json({ erro: "Env ausente: SUPABASE_URL" });
-    return null;
-  }
-  if (!supabaseKey) {
-    res.status(500).json({ erro: "Env ausente: SUPABASE_KEY" });
-    return null;
-  }
-  return createClient(supabaseUrl, supabaseKey);
+function getSupabaseClient() {
+  return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 }
-
-import getRawBody from "raw-body";
 
 async function readBodySafe(req) {
-  const raw = await getRawBody(req, {
-    length: req.headers["content-length"],
-    limit: "1mb",
-    encoding: "utf-8"
-  });
+  // 1) Next já parseou
+  if (req.body && typeof req.body === "object") return req.body;
 
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return {};
+  // 2) veio como string
+  if (typeof req.body === "string") {
+    try { return JSON.parse(req.body); } catch { return {}; }
   }
-}
 
+  // 3) stream manual
   return await new Promise((resolve) => {
     let data = "";
     req.on("data", (chunk) => (data += chunk));
     req.on("end", () => {
       if (!data) return resolve({});
-      try {
-        resolve(JSON.parse(data));
-      } catch {
-        resolve({});
-      }
+      try { resolve(JSON.parse(data)); } catch { resolve({}); }
     });
     req.on("error", () => resolve({}));
   });
 }
 
 export default async function handler(req, res) {
+  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
@@ -60,25 +35,15 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ erro: "Metodo no permitido" });
 
-  const supabase = getSupabaseClient(res);
-  if (!supabase) return;
-
   try {
     const body = await readBodySafe(req);
 
-    // Aceita várias grafias (pra não travar por detalhe)
-    const aluno_id =
-      body.aluno_id ??
-      body.alunoId ??
-      body.alunoid ??
-      body.aluno ??
-      null;
+    // DEBUG (veja em Vercel > Functions > api/lancar-consumo)
+    console.log("DEBUG headers:", req.headers);
+    console.log("DEBUG raw body parsed:", body);
 
-    const rawValor =
-      body.valor ??
-      body.valorTotal ??
-      body.total ??
-      null;
+    const aluno_id = body.aluno_id ?? body.alunoId ?? body.alunoid ?? null;
+    const rawValor = body.valor ?? body.total ?? body.valorTotal ?? null;
 
     const valorNum = Number(rawValor);
     const origem = (body.origem || "Venda na cantina").toString();
@@ -87,18 +52,19 @@ export default async function handler(req, res) {
     if (!aluno_id) {
       return res.status(400).json({
         erro: "Campo obrigatorio: aluno_id",
-        dica: "Envie aluno_id (ou alunoId / alunoid) no JSON"
+        dica: "Envie aluno_id (ou alunoId/alunoid). Ex: {\"aluno_id\":\"UUID\",\"valor\":10}"
       });
     }
-
     if (Number.isNaN(valorNum) || valorNum <= 0) {
       return res.status(400).json({
         erro: "Campo obrigatorio: valor (numero > 0)",
-        dica: "Envie valor (ou total / valorTotal) como numero"
+        dica: "Envie valor (ou total/valorTotal) como numero. Ex: {\"aluno_id\":\"UUID\",\"valor\":10}"
       });
     }
 
-    // 1) Busca aluno (aluno_id do JSON = alunos.id)
+    const supabase = getSupabaseClient();
+
+    // Busca aluno (aluno_id do JSON == alunos.id)
     const { data: aluno, error: erroAluno } = await supabase
       .from("alunos")
       .select("id, nome, ativo, saldo_atual, limite_diario, limite_mensal, limite_fiado")
@@ -114,21 +80,16 @@ export default async function handler(req, res) {
     const limiteMensal = Number(aluno.limite_mensal || 0);
     const limiteFiado = Number(aluno.limite_fiado || 0);
 
-    // 2) Calcula total do dia e do mês (somente débitos)
+    // Totais dia/mês (débitos)
     const agora = new Date();
-
-    const inicioHoje = new Date(agora);
-    inicioHoje.setHours(0, 0, 0, 0);
-
-    const inicioMes = new Date(agora.getFullYear(), agora.getMonth(), 1);
-    inicioMes.setHours(0, 0, 0, 0);
+    const inicioHoje = new Date(agora); inicioHoje.setHours(0, 0, 0, 0);
+    const inicioMes = new Date(agora.getFullYear(), agora.getMonth(), 1); inicioMes.setHours(0, 0, 0, 0);
 
     const { data: movDia, error: erroMovDia } = await supabase
       .from("movimentacoes_saldo")
       .select("valor")
       .eq("aluno_id", aluno_id)
       .gte("created_at", inicioHoje.toISOString());
-
     if (erroMovDia) return res.status(500).json({ erro: erroMovDia.message });
 
     const totalDia = (movDia || [])
@@ -141,7 +102,6 @@ export default async function handler(req, res) {
       .select("valor")
       .eq("aluno_id", aluno_id)
       .gte("created_at", inicioMes.toISOString());
-
     if (erroMovMes) return res.status(500).json({ erro: erroMovMes.message });
 
     const totalMes = (movMes || [])
@@ -149,33 +109,28 @@ export default async function handler(req, res) {
       .filter((v) => v < 0)
       .reduce((acc, v) => acc + Math.abs(v), 0);
 
-    // 3) Validações (se não forçar)
+    // Bloqueios com opção B (alerta e pergunta; libera com forcar:true)
     if (!forcar) {
       if (limiteDiario > 0 && totalDia + valorNum > limiteDiario) {
         return res.status(200).json({
           alerta: true,
           tipo: "limite_diario",
           mensagem: "Limite diario ultrapassado. Deseja liberar mesmo assim?",
-          aluno: { id: aluno.id, nome: aluno.nome, saldo_atual: saldoAtual },
           limite_diario: limiteDiario,
           total_dia: totalDia,
           valor_solicitado: valorNum
         });
       }
-
       if (limiteMensal > 0 && totalMes + valorNum > limiteMensal) {
         return res.status(200).json({
           alerta: true,
           tipo: "limite_mensal",
           mensagem: "Limite mensal ultrapassado. Deseja liberar mesmo assim?",
-          aluno: { id: aluno.id, nome: aluno.nome, saldo_atual: saldoAtual },
           limite_mensal: limiteMensal,
           total_mes: totalMes,
           valor_solicitado: valorNum
         });
       }
-
-      // Regra B: limite_fiado = 0 => sem limite
       if (limiteFiado > 0) {
         const saldoDepois = saldoAtual - valorNum;
         if (saldoDepois < -limiteFiado) {
@@ -183,8 +138,8 @@ export default async function handler(req, res) {
             alerta: true,
             tipo: "limite_fiado",
             mensagem: "Limite de fiado ultrapassado. Deseja liberar mesmo assim?",
-            aluno: { id: aluno.id, nome: aluno.nome, saldo_atual: saldoAtual },
             limite_fiado: limiteFiado,
+            saldo_atual: saldoAtual,
             saldo_apos_venda: saldoDepois,
             valor_solicitado: valorNum
           });
@@ -192,7 +147,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // 4) Atualiza saldo
+    // Atualiza saldo
     const saldoAnterior = saldoAtual;
     const saldoNovo = saldoAnterior - valorNum;
 
@@ -200,10 +155,9 @@ export default async function handler(req, res) {
       .from("alunos")
       .update({ saldo_atual: saldoNovo })
       .eq("id", aluno_id);
-
     if (erroUpdate) return res.status(500).json({ erro: erroUpdate.message });
 
-    // 5) Grava movimentação (referencia_id com underscore)
+    // Grava movimentação
     const { data: movCriada, error: erroInsert } = await supabase
       .from("movimentacoes_saldo")
       .insert({
@@ -216,4 +170,17 @@ export default async function handler(req, res) {
       .select("id, aluno_id, tipo, valor, origem, referencia_id, created_at")
       .single();
 
-    if (erroInsert) return res.status
+    if (erroInsert) return res.status(500).json({ erro: erroInsert.message });
+
+    return res.status(200).json({
+      sucesso: true,
+      liberado_manual: !!forcar,
+      aluno: { id: aluno.id, nome: aluno.nome },
+      saldo_anterior: saldoAnterior,
+      saldo_atual: saldoNovo,
+      movimentacao: movCriada
+    });
+  } catch (err) {
+    return res.status(500).json({ erro: err?.message || "Erro interno" });
+  }
+}
