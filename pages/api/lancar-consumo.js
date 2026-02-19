@@ -6,7 +6,7 @@ const supabase = createClient(
 )
 
 export default async function handler(req, res) {
-  // 🔓 CORS completo
+  // 🔓 CORS
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
   res.setHeader(
@@ -14,7 +14,6 @@ export default async function handler(req, res) {
     'Content-Type, Authorization'
   )
 
-  // ✅ responde preflight SEMPRE
   if (req.method === 'OPTIONS') {
     return res.status(200).json({})
   }
@@ -24,7 +23,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { aluno_id, valor, descricao } = req.body
+    const { aluno_id, valor, descricao, forcar } = req.body
 
     if (!aluno_id || !valor) {
       return res.status(400).json({ erro: 'Dados obrigatórios faltando' })
@@ -39,6 +38,58 @@ export default async function handler(req, res) {
 
     if (erroAluno || !aluno) {
       return res.status(404).json({ erro: 'Aluno não encontrado' })
+    }
+
+    // 📅 hoje (UTC simples)
+    const hojeInicio = new Date()
+    hojeInicio.setHours(0, 0, 0, 0)
+
+    // 📅 início do mês
+    const inicioMes = new Date(
+      hojeInicio.getFullYear(),
+      hojeInicio.getMonth(),
+      1
+    )
+
+    // 🔎 total diário
+    const { data: movDia } = await supabase
+      .from('movimentacoes_saldo')
+      .select('valor')
+      .eq('aluno_id', aluno_id)
+      .gte('created_at', hojeInicio.toISOString())
+
+    const totalDia =
+      movDia?.reduce((s, m) => s + Math.abs(Number(m.valor)), 0) || 0
+
+    // 🔎 total mensal
+    const { data: movMes } = await supabase
+      .from('movimentacoes_saldo')
+      .select('valor')
+      .eq('aluno_id', aluno_id)
+      .gte('created_at', inicioMes.toISOString())
+
+    const totalMes =
+      movMes?.reduce((s, m) => s + Math.abs(Number(m.valor)), 0) || 0
+
+    // 🚨 valida limites
+    if (!forcar) {
+      if (aluno.limite_diario && totalDia + valor > aluno.limite_diario) {
+        return res.status(200).json({
+          alerta: true,
+          tipo: 'limite_diario',
+          mensagem: 'Limite diário ultrapassado',
+          total_dia: totalDia
+        })
+      }
+
+      if (aluno.limite_mensal && totalMes + valor > aluno.limite_mensal) {
+        return res.status(200).json({
+          alerta: true,
+          tipo: 'limite_mensal',
+          mensagem: 'Limite mensal ultrapassado',
+          total_mes: totalMes
+        })
+      }
     }
 
     const novoSaldo = Number(aluno.saldo_atual) - Number(valor)
@@ -58,7 +109,8 @@ export default async function handler(req, res) {
       aluno_id,
       valor: -Math.abs(valor),
       tipo: 'debito',
-      descricao: descricao || 'Venda na cantina'
+      descricao: descricao || 'Venda na cantina',
+      liberado_manual: !!forcar
     })
 
     return res.status(200).json({
