@@ -29,14 +29,14 @@ export default async function handler(req, res) {
     if (erroAluno || !aluno) return res.status(404).json({ erro: "Aluno nao encontrado" });
     if (aluno.ativo === false) return res.status(400).json({ erro: "Aluno inativo" });
 
-    // 2) Calcula total gasto hoje e no mês (usando movimentacoessaldo)
+    // 2) Calcula total gasto hoje e no mês (usando movimentacoes_saldo)
     const hojeInicio = new Date();
     hojeInicio.setHours(0, 0, 0, 0);
 
     const inicioMes = new Date(hojeInicio.getFullYear(), hojeInicio.getMonth(), 1);
 
     const { data: movDia, error: erroMovDia } = await supabase
-      .from("movimentacoessaldo")
+      .from("movimentacoes_saldo")
       .select("valor, createdat")
       .eq("alunoid", alunoid)
       .gte("createdat", hojeInicio.toISOString());
@@ -48,7 +48,7 @@ export default async function handler(req, res) {
       .reduce((s, m) => s + Math.abs(Number(m.valor)), 0);
 
     const { data: movMes, error: erroMovMes } = await supabase
-      .from("movimentacoessaldo")
+      .from("movimentacoes_saldo")
       .select("valor, createdat")
       .eq("alunoid", alunoid)
       .gte("createdat", inicioMes.toISOString());
@@ -99,7 +99,7 @@ export default async function handler(req, res) {
     if (erroUpdate) return res.status(500).json({ erro: erroUpdate.message });
 
     const { error: erroMov } = await supabase
-      .from("movimentacoessaldo")
+      .from("movimentacoes_saldo")
       .insert({
         alunoid,
         tipo: "debito",
