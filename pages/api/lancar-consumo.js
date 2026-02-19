@@ -1,124 +1,124 @@
-import { createClient } from '@supabase/supabase-js'
+import { createClient } from "@supabase/supabase-js";
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY
-)
+const supabase = createClient(process.env.SUPABASEURL, process.env.SUPABASEKEY);
 
 export default async function handler(req, res) {
-  // 🔓 CORS
-  res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    'Content-Type, Authorization'
-  )
+  // CORS
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
-  if (req.method === 'OPTIONS') {
-    return res.status(200).json({})
-  }
-
-  if (req.method !== 'POST') {
-    return res.status(405).json({ erro: 'Método não permitido' })
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ erro: "Metodo no permitido" });
 
   try {
-    const { aluno_id, valor, descricao, forcar } = req.body
+    const { alunoid, valor, descricao, forcar } = req.body || {};
+    const v = Number(valor);
 
-    if (!aluno_id || !valor) {
-      return res.status(400).json({ erro: 'Dados obrigatórios faltando' })
+    if (!alunoid || !valor || Number.isNaN(v) || v <= 0) {
+      return res.status(400).json({ erro: "Dados obrigatorios faltando (alunoid, valor>0)" });
     }
 
-    // 🔎 busca aluno
+    // 1) Busca aluno + limites
     const { data: aluno, error: erroAluno } = await supabase
-      .from('alunos')
-      .select('*')
-      .eq('id', aluno_id)
-      .single()
+      .from("alunos")
+      .select("id, nome, saldoatual, limitediario, limitemensal, limitefiado, ativo")
+      .eq("id", alunoid)
+      .single();
 
-    if (erroAluno || !aluno) {
-      return res.status(404).json({ erro: 'Aluno não encontrado' })
-    }
+    if (erroAluno || !aluno) return res.status(404).json({ erro: "Aluno nao encontrado" });
+    if (aluno.ativo === false) return res.status(400).json({ erro: "Aluno inativo" });
 
-    // 📅 hoje (UTC simples)
-    const hojeInicio = new Date()
-    hojeInicio.setHours(0, 0, 0, 0)
+    // 2) Calcula total gasto hoje e no mês (usando movimentacoessaldo)
+    const hojeInicio = new Date();
+    hojeInicio.setHours(0, 0, 0, 0);
 
-    // 📅 início do mês
-    const inicioMes = new Date(
-      hojeInicio.getFullYear(),
-      hojeInicio.getMonth(),
-      1
-    )
+    const inicioMes = new Date(hojeInicio.getFullYear(), hojeInicio.getMonth(), 1);
 
-    // 🔎 total diário
-    const { data: movDia } = await supabase
-      .from('movimentacoes_saldo')
-      .select('valor')
-      .eq('aluno_id', aluno_id)
-      .gte('created_at', hojeInicio.toISOString())
+    const { data: movDia, error: erroMovDia } = await supabase
+      .from("movimentacoessaldo")
+      .select("valor, createdat")
+      .eq("alunoid", alunoid)
+      .gte("createdat", hojeInicio.toISOString());
 
-    const totalDia =
-      movDia?.reduce((s, m) => s + Math.abs(Number(m.valor)), 0) || 0
+    if (erroMovDia) return res.status(500).json({ erro: erroMovDia.message });
 
-    // 🔎 total mensal
-    const { data: movMes } = await supabase
-      .from('movimentacoes_saldo')
-      .select('valor')
-      .eq('aluno_id', aluno_id)
-      .gte('created_at', inicioMes.toISOString())
+    const totalDia = (movDia || [])
+      .filter(m => Number(m.valor) < 0) // débitos
+      .reduce((s, m) => s + Math.abs(Number(m.valor)), 0);
 
-    const totalMes =
-      movMes?.reduce((s, m) => s + Math.abs(Number(m.valor)), 0) || 0
+    const { data: movMes, error: erroMovMes } = await supabase
+      .from("movimentacoessaldo")
+      .select("valor, createdat")
+      .eq("alunoid", alunoid)
+      .gte("createdat", inicioMes.toISOString());
 
-    // 🚨 valida limites
+    if (erroMovMes) return res.status(500).json({ erro: erroMovMes.message });
+
+    const totalMes = (movMes || [])
+      .filter(m => Number(m.valor) < 0)
+      .reduce((s, m) => s + Math.abs(Number(m.valor)), 0);
+
+    // 3) Regra B: se estourar, retorna alerta e só prossegue com forcar=true
     if (!forcar) {
-      if (aluno.limite_diario && totalDia + valor > aluno.limite_diario) {
+      if (Number(aluno.limitediario) > 0 && (totalDia + v) > Number(aluno.limitediario)) {
         return res.status(200).json({
           alerta: true,
-          tipo: 'limite_diario',
-          mensagem: 'Limite diário ultrapassado',
-          total_dia: totalDia
-        })
+          tipo: "limitediario",
+          mensagem: "Limite diario ultrapassado. Deseja liberar mesmo assim?",
+          alunoid,
+          aluno: aluno.nome,
+          totalDia,
+          limiteDiario: aluno.limitediario,
+          valorSolicitado: v
+        });
       }
 
-      if (aluno.limite_mensal && totalMes + valor > aluno.limite_mensal) {
+      if (Number(aluno.limitemensal) > 0 && (totalMes + v) > Number(aluno.limitemensal)) {
         return res.status(200).json({
           alerta: true,
-          tipo: 'limite_mensal',
-          mensagem: 'Limite mensal ultrapassado',
-          total_mes: totalMes
-        })
+          tipo: "limitemensal",
+          mensagem: "Limite mensal ultrapassado. Deseja liberar mesmo assim?",
+          alunoid,
+          aluno: aluno.nome,
+          totalMes,
+          limiteMensal: aluno.limitemensal,
+          valorSolicitado: v
+        });
       }
     }
 
-    const novoSaldo = Number(aluno.saldo_atual) - Number(valor)
+    // 4) Debita saldo e registra movimentação
+    const novoSaldo = Number(aluno.saldoatual) - v;
 
-    // 💾 atualiza saldo
     const { error: erroUpdate } = await supabase
-      .from('alunos')
-      .update({ saldo_atual: novoSaldo })
-      .eq('id', aluno_id)
+      .from("alunos")
+      .update({ saldoatual: novoSaldo })
+      .eq("id", alunoid);
 
-    if (erroUpdate) {
-      return res.status(500).json({ erro: erroUpdate.message })
-    }
+    if (erroUpdate) return res.status(500).json({ erro: erroUpdate.message });
 
-    // 🧾 movimentação
-    await supabase.from('movimentacoes_saldo').insert({
-      aluno_id,
-      valor: -Math.abs(valor),
-      tipo: 'debito',
-      descricao: descricao || 'Venda na cantina',
-      liberado_manual: !!forcar
-    })
+    const { error: erroMov } = await supabase
+      .from("movimentacoessaldo")
+      .insert({
+        alunoid,
+        tipo: "debito",
+        valor: -Math.abs(v),
+        descricao: descricao || "Venda na cantina",
+        liberadomanual: !!forcar
+      });
+
+    if (erroMov) return res.status(500).json({ erro: erroMov.message });
 
     return res.status(200).json({
       sucesso: true,
-      saldo_anterior: aluno.saldo_atual,
-      saldo_atual: novoSaldo
-    })
+      aluno: aluno.nome,
+      saldoAnterior: Number(aluno.saldoatual),
+      saldoAtual: novoSaldo,
+      liberadoManual: !!forcar
+    });
+
   } catch (err) {
-    return res.status(500).json({ erro: err.message })
+    return res.status(500).json({ erro: err?.message || "Erro interno" });
   }
 }
