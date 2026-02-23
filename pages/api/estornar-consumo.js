@@ -1,13 +1,26 @@
 import { createClient } from "@supabase/supabase-js";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+// ===== Supabase (usando suas envs) =====
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY;
+
+if (!supabaseUrl || !supabaseKey) {
+  throw new Error("Variáveis do Supabase não configuradas");
+}
+
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 // ===== helper seguro para ler body =====
 async function readBodySafe(req) {
-  if (req.body) return req.body;
+  if (req.body && typeof req.body === "object") return req.body;
+
+  if (typeof req.body === "string") {
+    try {
+      return JSON.parse(req.body);
+    } catch {
+      return {};
+    }
+  }
 
   return await new Promise((resolve) => {
     let data = "";
@@ -19,10 +32,18 @@ async function readBodySafe(req) {
         resolve({});
       }
     });
+    req.on("error", () => resolve({}));
   });
 }
 
 export default async function handler(req, res) {
+  // ===== CORS (ajuda no Botpress) =====
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Max-Age", "86400");
+
+  if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") {
     return res.status(405).json({ erro: "Metodo nao permitido" });
   }
@@ -33,30 +54,30 @@ export default async function handler(req, res) {
 
     // 🔥 Se não veio ID, tenta achar pela última venda do aluno
     if (!movimentacao_id && nome) {
-      const { data: aluno } = await supabase
+      const { data: alunoBusca, error: erroBuscaAluno } = await supabase
         .from("alunos")
         .select("id")
-        .ilike("nome", nome)
+        .ilike("nome", `%${nome}%`)
         .limit(1)
         .single();
 
-      if (!aluno) {
+      if (erroBuscaAluno || !alunoBusca) {
         return res
           .status(404)
           .json({ erro: "Aluno nao encontrado para estorno" });
       }
 
       // pega última venda (debito)
-      const { data: ultimaMov } = await supabase
+      const { data: ultimaMov, error: erroUltimaMov } = await supabase
         .from("movimentacoes_saldo")
         .select("id")
-        .eq("aluno_id", aluno.id)
+        .eq("aluno_id", alunoBusca.id)
         .eq("tipo", "debito")
         .order("created_at", { ascending: false })
         .limit(1)
         .single();
 
-      if (!ultimaMov) {
+      if (erroUltimaMov || !ultimaMov) {
         return res
           .status(404)
           .json({ erro: "Aluno nao possui vendas para estornar" });
